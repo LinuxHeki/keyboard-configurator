@@ -263,7 +263,7 @@ impl Keyboard {
         }
     }
 
-    fn layout(&self) -> &Layout {
+    pub fn layout(&self) -> &Layout {
         &self.inner().board.layout()
     }
 

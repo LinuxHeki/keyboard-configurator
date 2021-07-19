@@ -32,6 +32,9 @@ pub static SCANCODE_LABELS: Lazy<HashMap<String, String>> = Lazy::new(|| {
 pub struct PickerInner {
     group_box: DerefCell<PickerGroupBox>,
     keyboard: RefCell<Option<Keyboard>>,
+    mod_tap_box: DerefCell<gtk::Box>,
+    mod_tap_check: DerefCell<gtk::CheckButton>,
+    mod_tap_mods: DerefCell<gtk::ComboBoxText>,
 }
 
 #[glib::object_subclass]
@@ -52,13 +55,49 @@ impl ObjectImpl for PickerInner {
             }));
         };
 
+        // TODO: set initial values, bind change
+
+        let mod_tap_check = cascade! {
+            gtk::CheckButton::with_label("Mod-Tap");
+            ..connect_toggled(clone!(@weak picker => move |_| {
+                picker.mod_tap_updated();
+            }));
+        };
+
+        let mod_tap_mods = cascade! {
+            gtk::ComboBoxText::new();
+            ..append(Some("LEFT_CTRL"), "Left Ctrl");
+            ..append(Some("LEFT_SHIFT"), "Left Shift");
+            ..append(Some("LEFT_ALT"), "Left Alt");
+            ..append(Some("LEFT_SUPER"), "Left Super");
+            ..append(Some("RIGHT_CTRL"), "Right Ctrl");
+            ..append(Some("RIGHT_SHIFT"), "Right Shift");
+            ..append(Some("RIGHT_ALT"), "Right Alt");
+            ..append(Some("RIGHT_SUPER"), "Right Super");
+            ..connect_property_active_id_notify(clone!(@weak picker => move |_| {
+                picker.mod_tap_updated();
+            }));
+        };
+
+        let mod_tap_box = cascade! {
+            gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            ..add(&mod_tap_check);
+            ..add(&mod_tap_mods);
+        };
+
         cascade! {
             picker;
+            ..set_spacing(18);
+            ..set_orientation(gtk::Orientation::Vertical);
             ..add(&group_box);
+            ..add(&mod_tap_box);
             ..show_all();
         };
 
         self.group_box.set(group_box);
+        self.mod_tap_box.set(mod_tap_box);
+        self.mod_tap_check.set(mod_tap_check);
+        self.mod_tap_mods.set(mod_tap_mods);
     }
 }
 
@@ -91,20 +130,34 @@ impl Picker {
             // Check that scancode is available for the keyboard
             self.inner().group_box.set_key_visibility(|name| {
                 let visible = kb.has_scancode(name);
-                let sensitive = true;
+                // XXX only with mod-tap
+                let sensitive = kb.layout().scancode_from_name(name).unwrap_or(0) < 256;
                 (visible, sensitive)
             });
             kb.set_picker(Some(&self));
+
+            self.inner()
+                .mod_tap_box
+                .set_visible(kb.layout().meta.has_mod_tap);
         }
 
         *self.inner().keyboard.borrow_mut() = keyboard;
     }
 
     pub(crate) fn set_selected(&self, scancode_names: Vec<String>) {
+        // TODO selected needs to support mod tap
         self.inner().group_box.set_selected(scancode_names);
     }
 
-    fn key_pressed(&self, name: String) {
+    fn mod_(&self) -> Option<String> {
+        if self.inner().mod_tap_check.get_active() {
+            Some(self.inner().mod_tap_mods.get_active_id()?.into())
+        } else {
+            None
+        }
+    }
+
+    fn key_pressed(&self, mut name: String) {
         let kb = match self.inner().keyboard.borrow().clone() {
             Some(kb) => kb,
             None => {
@@ -113,11 +166,14 @@ impl Picker {
         };
         let layer = kb.layer();
 
+        if let Some(mod_) = self.mod_() {
+            name = format!("MT({}, {})", mod_, name);
+        }
+
         info!("Clicked {} layer {:?}", name, layer);
         if let Some(layer) = layer {
             let futures = FuturesUnordered::new();
-            for i in kb.selected().iter() {
-                let i = *i;
+            for i in kb.selected().iter().copied() {
                 futures.push(clone!(@strong kb, @strong name => async move {
                     kb.keymap_set(i, layer, &name).await;
                 }));
@@ -125,6 +181,8 @@ impl Picker {
             glib::MainContext::default().spawn_local(async { futures.collect::<()>().await });
         }
     }
+
+    fn mod_tap_updated(&self) {}
 }
 
 #[cfg(test)]
